@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from convlstmcell import ConvLSTMCell
+from convlstmcellspike import ConvLSTMCellSpike
 from torch.autograd import Variable
+
+from norse.torch.module.encode import ConstantCurrentLIFEncoder
 
 
 from debug import info
-
 
 class PredNet(nn.Module):
     def __init__(self, R_channels, A_channels, output_mode='error'):
@@ -20,7 +21,7 @@ class PredNet(nn.Module):
         assert output_mode in default_output_modes, 'Invalid output_mode: ' + str(output_mode)
 
         for i in range(self.n_layers):
-            cell = ConvLSTMCell(2 * self.a_channels[i] + self.r_channels[i+1],                                                                             self.r_channels[i],
+            cell = ConvLSTMCellSpike(2 * self.a_channels[i] + self.r_channels[i+1],                                                                             self.r_channels[i],
                                 (3, 3))
             setattr(self, 'cell{}'.format(i), cell)
 

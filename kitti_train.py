@@ -10,9 +10,11 @@ from prednet import PredNet
 
 from debug import info
 
+import pytorch_lightning as pl
+from pytorch_lightning import Trainer
 
-num_epochs = 150
-batch_size = 16
+num_epochs = 30
+batch_size = 2
 A_channels = (3, 48, 96, 192)
 R_channels = (3, 48, 96, 192)
 lr = 0.001 # if epoch < 75 else 0.0001
@@ -23,7 +25,7 @@ time_loss_weights = 1./(nt - 1) * torch.ones(nt, 1)
 time_loss_weights[0] = 0
 time_loss_weights = Variable(time_loss_weights.cuda())
 
-DATA_DIR = '/media/lei/000F426D0004CCF4/datasets/kitti_data'
+DATA_DIR = '/home/jeped/pytorch-prednet/kitti_hkl/'
 
 train_file = os.path.join(DATA_DIR, 'X_train.hkl')
 train_sources = os.path.join(DATA_DIR, 'sources_train.hkl')
@@ -34,43 +36,50 @@ val_sources = os.path.join(DATA_DIR, 'sources_val.hkl')
 kitti_train = KITTI(train_file, train_sources, nt)
 kitti_val = KITTI(val_file, val_sources, nt)
 
-train_loader = DataLoader(kitti_train, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(kitti_val, batch_size=batch_size, shuffle=True)
+train_loader = DataLoader(kitti_train, batch_size=batch_size, shuffle=True, num_workers=12)
+val_loader = DataLoader(kitti_val, batch_size=batch_size, shuffle=True, num_workers=12)
 
-model = PredNet(R_channels, A_channels, output_mode='error')
-if torch.cuda.is_available():
-    print('Using GPU.')
-    model.cuda()
+class PredNetClassifier(pl.LightningModule):
+    def __init__(self):
+        super().__init__()
+        self.model = PredNet(R_channels, A_channels, output_mode='error')
 
-optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    def forward(self, x):
+        inputs = x.permute(0, 1, 4, 2, 3) # batch x time_steps x channel x width x height
+        return self.model(inputs)
 
-def lr_scheduler(optimizer, epoch):
-    if epoch < num_epochs //2:
-        return optimizer
-    else:
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = 0.0001
-        return optimizer
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=lr)
 
-
-
-for epoch in range(num_epochs):
-    optimizer = lr_scheduler(optimizer, epoch)
-    for i, inputs in enumerate(train_loader):
-        inputs = inputs.permute(0, 1, 4, 2, 3) # batch x time_steps x channel x width x height
-        inputs = Variable(inputs.cuda())
-        errors = model(inputs) # batch x n_layers x nt
+    def training_step(self, batch, batch_idx):
+        errors = self(batch)
         loc_batch = errors.size(0)
         errors = torch.mm(errors.view(-1, nt), time_loss_weights) # batch*n_layers x 1
         errors = torch.mm(errors.view(loc_batch, -1), layer_loss_weights)
         errors = torch.mean(errors)
 
-        optimizer.zero_grad()
+        result = pl.TrainResult(errors)
+        result.log('train_loss', errors, on_epoch=True)
+    
+    # def validation_step(self, batch, batch_idx):
+    #     errors = self(batch)
+    #     loc_batch = errors.size(0)
+    #     errors = torch.mm(errors.view(-1, nt), time_loss_weights) # batch*n_layers x 1
+    #     errors = torch.mm(errors.view(loc_batch, -1), layer_loss_weights)
+    #     errors = torch.mean(errors)
 
-        errors.backward()
+    #     result = pl.EvalResult(checkpoint_on=errors)
+    #     result.log('val_loss', errors, on_epoch=True)
 
-        optimizer.step()
-        if i%10 == 0:
-            print('Epoch: {}/{}, step: {}/{}, errors: {}'.format(epoch, num_epochs, i, len(kitti_train)//batch_size, errors.data[0]))
+# def lr_scheduler(optimizer, epoch):
+#     if epoch < num_epochs //2:
+#         return optimizer
+#     else:
+#         for param_group in optimizer.param_groups:
+#             param_group['lr'] = 0.0001
+#         return optimizer
 
-torch.save(model.state_dict(), 'training.pt')
+model = PredNetClassifier()
+trainer = Trainer(gpus=4, distributed_backend='ddp')
+trainer.fit(model, train_loader, val_loader)
+torch.save(model.model.state_dict(), 'training.pt')
